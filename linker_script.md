@@ -122,11 +122,59 @@ Once you write to VTOR, the CPU will look at the new dynamic location for all *f
 
 The table must be at the beginning of Flash **only for the very first instruction**. The CPU needs a fixed "North Star" to know how to wake up. Once it is awake, you can move the table wherever you want.
 
----
-
-**Would you like to see a code snippet of how to relocate the vector table to RAM using the VTOR register?**
-
 UQUESTION: Who is responsible for keeping track of the max length of the ISR vector table? Like is it always the same size? Is it fixed size? So even if I don't create any more interrupts will that affect the final size of the vector table? My intuition tells me that we would not just have empty vector table entries so that we can save on precious space, so maybe somewhere else we store the variable length of the ISR vector table.
+
+You are asking about the difference between a **Map** (key-value pairs, variable size) and an **Array** (fixed index, fixed offset).
+
+Your intuition is optimizing for **space**.
+The hardware is optimizing for **speed**.
+
+Here is why we don't store the table as a variable-length list, and who is actually responsible for defining it.
+
+### 1. The "Who": The Silicon Vendor & The Startup Code
+
+There are two layers of responsibility here:
+
+1. **The Silicon Vendor (e.g., ST, Nordic, TI):** When they design the chip, they hardwire the "slots." They decide that the "UART0 Interrupt" will **always** be at offset `0x80`. This is baked into the silicon.
+2. **The Software (You/The Startup File):** The `startup_device.s` (assembly) or `.c` file defines the actual array in code. It lists the function pointers in the exact order the vendor specified.
+
+### 2. Why it isn't Variable Length (The Math)
+
+To support a variable-length table (where we delete unused entries to save space), the hardware would need to perform a search or a lookup.
+
+* *Hardware would have to think:* "Okay, I need UART0. Let me check the table... is entry 1 UART0? No. Is entry 2 UART0? No..."
+
+This is too slow (O(n) complexity). Interrupts need to be instant.
+
+Instead, the hardware uses **O(1) Arithmetic**:
+
+
+Because the hardware uses simple multiplication to find the address, **you cannot have gaps.** If the hardware expects the UART interrupt at Index 50, and you delete the unused Index 49 to save space, Index 50 shifts down to 49. When the UART fires, the hardware jumps to the wrong handler.
+
+### 3. The "Swiss Cheese" Reality
+
+Because of this math, the vector table is often full of "holes."
+
+If your chip supports 100 interrupts, but you only use the very first one and the very last one, you must still allocate space for the 98 entries in between.
+
+* **Q: What goes in the empty slots?**
+* **A:** Usually a pointer to a `Default_Handler` (an infinite loop). If a "ghost interrupt" fires for some reason, the CPU jumps there and hangs, which is better than jumping into random code.
+
+### 4. The One Optimization You *Can* Do
+
+While you cannot delete entries in the *middle*, you technically can truncate the **end** of the table.
+
+If the hardware supports 240 interrupts, but your application only uses the first 50, you *could* tell the Linker Script to stop the `.isr_vector` section after the 50th entry.
+
+* **The Risk:** If for some reason interrupt #51 fires (maybe a glitch or bad configuration), the hardware will try to read memory *past* your table. It might read random garbage data as a function address, jump there, and crash.
+
+### Summary
+
+The vector table is a **Fixed-Index Array**, not a Linked List.
+
+* **Who tracks the max length?** The hardware limits are in the datasheet (NVIC implementation). The actual length is defined in your **Linker Script** (`.ld` file) and **Startup Object**.
+* **Is it fixed size?** It is fixed *width* (usually 4 bytes per entry). The total *length* is determined by the highest interrupt number supported by the chip.
+
 
 UQUESTION: If the ISR vector table is a fixed size and is always placed at the start of flash memory, shouldn't we specify to flash our actual code at START_FLASH_MEM + LEN_ISR_VECTOR_TABLE?
 

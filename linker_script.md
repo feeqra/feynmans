@@ -122,7 +122,7 @@ Once you write to VTOR, the CPU will look at the new dynamic location for all *f
 
 The table must be at the beginning of Flash **only for the very first instruction**. The CPU needs a fixed "North Star" to know how to wake up. Once it is awake, you can move the table wherever you want.
 
-UQUESTION: Who is responsible for keeping track of the max length of the ISR vector table? Like is it always the same size? Is it fixed size? So even if I don't create any more interrupts will that affect the final size of the vector table? My intuition tells me that we would not just have empty vector table entries so that we can save on precious space, so maybe somewhere else we store the variable length of the ISR vector table.
+AQUESTION: Who is responsible for keeping track of the max length of the ISR vector table? Like is it always the same size? Is it fixed size? So even if I don't create any more interrupts will that affect the final size of the vector table? My intuition tells me that we would not just have empty vector table entries so that we can save on precious space, so maybe somewhere else we store the variable length of the ISR vector table.
 
 You are asking about the difference between a **Map** (key-value pairs, variable size) and an **Array** (fixed index, fixed offset).
 
@@ -176,13 +176,294 @@ The vector table is a **Fixed-Index Array**, not a Linked List.
 * **Is it fixed size?** It is fixed *width* (usually 4 bytes per entry). The total *length* is determined by the highest interrupt number supported by the chip.
 
 
-UQUESTION: If the ISR vector table is a fixed size and is always placed at the start of flash memory, shouldn't we specify to flash our actual code at START_FLASH_MEM + LEN_ISR_VECTOR_TABLE?
+AQUESTION: If the ISR vector table is a fixed size and is always placed at the start of flash memory, shouldn't we specify to flash our actual code at START_FLASH_MEM + LEN_ISR_VECTOR_TABLE?
 
-UQUESTION: Constants go into flash?
+Yes, you are 100% correct.
 
-UQUESTION: Why do global variables need to survive power loss? Are you saying we never want volatile global variables?
+The code *must* start after the vector table. If you tried to write your `main()` function at address `0x00000000`, you would overwrite the Stack Pointer and Reset Vector, and the chip would brick immediately.
 
-UQUESTION: If the ISR table always goes at the beginning of flash, I guess I find it redundant to specify in the linker file "put the ISR table at the beginning of flash". Just hardcode it to do that? Like is not the point of the linker file to give the user the ability to make modifications? So the fact that they put the ISR in the linker file communicates that there are some cases where you wouldn't want to put it in that hardcoded spot: beginning of flash?
+However, you rarely have to hard-code that offset math (e.g., `0x08000000 + 0x194`) yourself. The **Linker Script** handles the "cursor" for you.
+
+Here is how the Linker Script automates this so you don't have to count bytes manually.
+
+### 1. The "Cursor" Analogy
+
+Imagine the Linker is a writer with a cursor.
+
+1. You tell it: "Start at the beginning of Flash."
+2. You tell it: "Write the Vector Table." -> The cursor moves down by the size of the table.
+3. You tell it: "Write the Code (`.text`)." -> The writer starts writing code **exactly where the cursor stopped**.
+
+### 2. The Linker Script (`.ld`)
+
+Here is a simplified view of what happens inside the `SECTIONS` block of your linker script:
+
+```ld
+/* Define the start of Flash memory */
+MEMORY
+{
+  FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 128K
+}
+
+SECTIONS
+{
+    /* 1. Place the Vector Table FIRST */
+    .isr_vector :
+    {
+        . = ALIGN(4);
+        KEEP(*(.isr_vector)) /* Keep this section even if unused */
+        . = ALIGN(4);
+    } > FLASH
+
+    /* The 'Cursor' is now at 0x08000000 + Length_of_Vectors */
+
+    /* 2. Place the Program Code (.text) RIGHT AFTER */
+    .text :
+    {
+        . = ALIGN(4);
+        *(.text)           /* Your code (.c files) */
+        *(.rodata)         /* Read-only constants */
+        . = ALIGN(4);
+    } > FLASH
+}
+
+```
+
+* **`KEEP(*(.isr_vector))`**: This commands the linker to take the array defined in your startup file and stick it at the very top.
+* **The Flow**: Because `.text` is listed *after* `.isr_vector`, the linker automatically calculates the end address of the vectors and starts placing your code immediately after it.
+
+### 3. Verification ( The `.map` file)
+
+If you ever doubt this is happening, you can open the **.map file** generated after you build. It explicitly lists where everything landed.
+
+You will see something like:
+
+| Section | Address | Size | Content |
+| --- | --- | --- | --- |
+| `.isr_vector` | `0x08000000` | `0x188` | (The Table) |
+| `.text` | `0x08000188` | `0x2040` | `main`, `HAL_Init`, etc. |
+
+Notice that `.text` starts exactly where `.isr_vector` ended (`0x08000000 + 0x188`).
+
+### Summary
+
+You don't typically calculate `START_FLASH_MEM + LEN_ISR_VECTOR_TABLE` manually. You simply list the Vector Table section **first** in the Linker Script, and the Linker pushes everything else down automatically.
+
+
+AQUESTION: Why do global variables need to survive power loss? Are you saying we never want volatile global variables?
+
+This is a crucial misunderstanding to clear up!
+
+**Standard global variables DO NOT survive power loss.**
+
+If you have a global variable `int counter = 0;`, and you increment it to `500`, then pull the plug and plug it back in... **`counter` will be `0` again.**
+
+Here is the distinction between "Survival" (Flash) and "Operation" (RAM).
+
+### 1. The confusing part: "The Initial Value"
+
+You might think global variables survive because if you write `int myGlobal = 42;`, it is always `42` when the system starts.
+
+* **The `42` survives:** The *number* 42 is stored in **Flash** (which is non-volatile/permanent).
+* **The `myGlobal` dies:** The *variable* itself lives in **RAM**.
+
+**At Startup (The Copy Trick):**
+When your chip wakes up, the very first thing the startup code does is copy the `42` from Flash into the RAM address for `myGlobal`.
+
+* If you change `myGlobal` to `99` while running, that `99` is in RAM.
+* When power dies, the RAM (and the `99`) is wiped.
+* When power returns, the startup code grabs the original `42` from Flash again.
+
+### 2. Why we WANT variables in Volatile Memory (RAM)
+
+You asked: *"Are you saying we never want volatile global variables?"*
+
+We **absolutely** want them in volatile RAM. Here is why we don't put variables in Flash:
+
+1. **Speed:** RAM is incredibly fast to read/write. Flash is slow to write.
+2. **Wear:** Flash memory physically degrades. You can only write to a specific Flash sector ~10,000 to 100,000 times before it breaks. If you put a loop counter in Flash, you would burn out your chip in seconds. RAM has infinite write cycles.
+3. **Hardware execution:** The CPU is designed to manipulate data in registers and RAM.
+
+### 3. "The Exception": What if I *need* it to survive?
+
+If you have data that truly needs to survive power loss (like "WiFi Credentials" or "Total Hours Run"), you cannot use a standard global variable.
+
+You must specifically write code to "Save to Flash" or "Save to EEPROM."
+
+1. **Read:** On boot, you read from that specific Flash address into a RAM variable.
+2. **Write:** When the value changes, you trigger a Flash Erase/Program sequence (which takes time, sometimes milliseconds) to update the persistent storage.
+
+### Summary
+
+* **Vector Table:** MUST be in Flash (Non-Volatile) because the CPU needs it immediately upon wake-up, before it has time to "copy" anything.
+* **Global Variables:** Live in RAM (Volatile). We want them there for speed and durability. Their *starting values* come from Flash, but their *current values* die with the power.
+
+
+AQUESTION: If the ISR table always goes at the beginning of flash, I guess I find it redundant to specify in the linker file "put the ISR table at the beginning of flash". Just hardcode it to do that? Like is not the point of the linker file to give the user the ability to make modifications? So the fact that they put the ISR in the linker file communicates that there are some cases where you wouldn't want to put it in that hardcoded spot: beginning of flash?
+
+This is a fantastic observation. You are essentially asking: *"Why do we need to manually configure something that seems to have only one valid option?"*
+
+The answer lies in the fact that **"Beginning of Flash" is not the only place code can start.**
+
+The Linker is a generic tool designed to handle complex memory maps. If the toolchain hardcoded the ISR table to the start of flash, it would break three major embedded workflows: **Bootloaders**, **RAM Debugging**, and **Dual-Bank Updates**.
+
+Here is why that flexibility in the Linker Script is mandatory, not redundant.
+
+### 1. The Bootloader Scenario (The #1 Reason)
+
+In a professional product, you rarely have just "One Application." You usually have two programs on the chip:
+
+1. **Bootloader (0x0800_0000):** Runs first. Checks if a firmware update is needed.
+2. **Main App (e.g., 0x0800_4000):** Your actual product code.
+
+If the linker *always* forced the ISR table to `0x0800_0000` (Start of Flash), you could **never** compile the Main App.
+
+* The Main App needs its *own* vector table.
+* That table must be placed at `0x0800_4000` (or wherever the App starts).
+* By specifying this in the Linker Script, you generate a binary that is correctly offset to run from that higher address.
+
+### 2. "Start of Flash" is Relative (Memory Aliasing)
+
+On many ARM chips (like STM32), address `0x0000_0000` is actually an **alias**.
+
+* Physical Flash might be at `0x0800_0000`.
+* Physical RAM might be at `0x2000_0000`.
+* The hardware maps `0x0000_0000` to point to *one* of these.
+
+Sometimes, for debugging, you want to load your **entire program into RAM** (not Flash) to avoid wearing out the flash memory during rapid test cycles.
+
+* In this case, you modify the Linker Script to put `.isr_vector` at `0x2000_0000` (Start of RAM).
+* If the linker forced "Start of Flash," you physically couldn't run this debug configuration.
+
+### 3. The "Generic Tool" Philosophy
+
+The GNU Linker (`ld`) is used for everything from tiny 8-bit microcontrollers to massive Linux kernels running on supercomputers.
+
+* It doesn't "know" you are using a Cortex-M4 that expects a table at reset.
+* It only knows: *"You gave me bytes. You gave me addresses. I will put the bytes at the addresses."*
+
+It leaves the architectural constraints (like "The hardware requires a table here") up to the **Linker Script author** (usually the silicon vendor who provides the template).
+
+### Summary
+
+The configuration seems redundant for a simple "Hello World" project, but it is critical for **Systems Architecture**.
+
+* **Bootloaders:** Need vector tables in the *middle* of flash.
+* **RAM Execution:** Needs vector tables in *RAM*.
+* **Multi-Core:** Core A might boot from `0x0800_0000`, while Core B boots from `0x0810_0000`.
+
+The linker script gives you the power to define "Beginning" however you want.
+
+UQUESTION: So it would be more appropriate to say "you must put the isr vector table at the start of the application code."? Because the reset handler is the first entry of the ISR vector table?
+
+You are getting closer to the perfect definition.
+
+You are **95% correct**, but that missing 5% is the difference between a working system and a "Hard Fault" crash.
+
+### 1. The Correction: It is NOT the First Entry
+
+You asked: *"Because the reset handler is the first entry of the ISR vector table?"*
+
+**No.** The Reset Handler is the **second** entry.
+
+The Cortex-M hardware expects the very first 32 bits (4 bytes) to be the **Initial Stack Pointer (MSP)** value.
+
+* **Address `0x00`:** Initial Stack Pointer Value (Where the stack starts in RAM).
+* **Address `0x04`:** Reset Handler Address (Where the code starts in Flash).
+
+If you put your Reset Handler (code instructions) at the very start (`0x00`), the CPU will try to load your machine code instructions as a memory address for the Stack Pointer. Your stack will point to a random location, and your chip will crash immediately.
+
+### 2. The Better Definition: "The Application Header"
+
+Your refined statement is excellent: **"The ISR vector table must be at the start of the application binary."**
+
+Think of the Vector Table as the **File Header** for your firmware.
+
+When a Bootloader wants to run your application, it doesn't just "jump to the start." It performs a handshake that relies on the table being at the start:
+
+1. **Read App Base + 0:** "Okay, here is where this app wants its **Stack** to be." -> *Update SP register.*
+2. **Read App Base + 4:** "Okay, here is where this app's **Code** begins." -> *Load into PC (Program Counter).*
+3. **Write App Base to VTOR:** "Okay, all future interrupts for this app are located here."
+
+### 3. Why "Start of Application" is the correct mental model
+
+You are right to move away from "Start of Flash."
+
+* **Bare Metal (No OS):** The "Application" starts at the "Start of Flash." (The Vector Table is at `0x08000000`).
+* **With Bootloader:** The "Application" starts at `0x08004000` (or wherever you put it). The Vector Table must be at `0x08004000`.
+
+In both cases, the **Vector Table anchors the application**. It defines the "Zero Point" for that specific piece of software.
+
+### Summary
+
+* **Correction:** The Reset Handler is the **2nd** entry. The **1st** is the Stack Pointer.
+* **Refinement:** Yes, the Vector Table must be at the **Start of the Application Image**. It serves as the "Table of Contents" that tells the CPU (or bootloader) how to set up the environment before running the first line of C code.
+
+---
+
+**Would you like to see the specific 3 lines of C code a Bootloader uses to read that table and jump to the application?**
+
+Here is the standard "Jump to Application" logic used in nearly every ARM Cortex-M bootloader.
+
+This code assumes your application is flashed at `0x08004000`.
+
+```c
+#define APP_ADDRESS  0x08004000
+
+void JumpToApplication(void)
+{
+    // 1. Read the Initial Stack Pointer (MSP) from Offset 0
+    // We treat the address as a pointer to a uint32_t, then dereference it.
+    uint32_t app_stack = *(volatile uint32_t*)APP_ADDRESS;
+
+    // 2. Read the Reset Handler Address from Offset 4
+    // We move the pointer 4 bytes forward, then dereference.
+    uint32_t app_reset_handler_address = *(volatile uint32_t*)(APP_ADDRESS + 4);
+
+    // 3. Set the MSP and Jump
+    // We cast the address to a function pointer so we can "call" it.
+    void (*app_reset_handler)(void) = (void*)app_reset_handler_address;
+
+    __set_MSP(app_stack);         // Hardware intrinsic to set the Main Stack Pointer
+    app_reset_handler();          // The actual jump!
+}
+
+```
+
+### Why this confirms your "Application Header" theory:
+
+Notice that the bootloader knows **nothing** about the application's code. It doesn't know where `main()` is. It doesn't know how big the app is.
+
+It only trusts the **Vector Table contract**:
+
+1. "I trust that the first 4 bytes at `APP_ADDRESS` are a valid Stack Pointer."
+2. "I trust that the next 4 bytes are the start of your code."
+
+If you compiled your application but forgot to put the vector table at the start, the bootloader would read random instruction opcodes (garbage) as the stack pointer and crash instantly.
+
+### One Critical Detail (The "Gotcha")
+
+There is one line of code missing above that you must add if your Bootloader used any interrupts.
+
+Before you jump, you **must disable all interrupts** (`__disable_irq()`) and clear any pending interrupt bits.
+
+* **Why?** If a timer interrupt fires *milliseconds* after you jump, the CPU will try to look up the handler.
+* But wait! The **VTOR** (Vector Table Offset Register) is likely still pointing to the *Bootloader's* table.
+* The CPU will try to run the Bootloader's Timer Handler, but the Bootloader's variables might not exist anymore. **Crash.**
+
+---
+
+**Would you like to see the Linker Script command (`MEMORY` command) that ensures the App creates this binary structure at the correct address?**
+
+UQUESTION: I don't understand why the application would crash if you put garbage as the first entry on the ISR vector table.
+
+UQUESTION: Casting an address to a function pointer? This is literally voodoo magic. You've gotta explain this syntax to me:     void (*app_reset_handler)(void) = (void*)app_reset_handler_address;
+
+UQUESTION: So wait theres an initial stack pointer and a main stack pointer? Two stack pointers? You've got to be kidding me.
+
+UQUESTION: What does "volatile" do here:     uint32_t app_stack = *(volatile uint32_t*)APP_ADDRESS;
+
+UQUESTION: Wait are you saying the OS is written to flash? You differentiated "No OS" vs "with a bootloader". Are you saying a boot loader is an OS?
 
 UQUESTION: You said global variables with initial values are put into flash and RAM, but you didn't say where global variables with no initial values are placed.
 

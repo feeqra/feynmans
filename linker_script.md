@@ -1,8 +1,3 @@
-Key:
-UQUESTION = UNANSWERED QUESTION
-AQUESTION = ANSWERED QUESTION
-
-
 A linker script (ending in .ld) is essentially a map that tells the linker exactly how to
  organize your compiled code and data inside the microcontroller's memory.
 
@@ -354,7 +349,7 @@ The configuration seems redundant for a simple "Hello World" project, but it is 
 
 The linker script gives you the power to define "Beginning" however you want.
 
-UQUESTION: So it would be more appropriate to say "you must put the isr vector table at the start of the application code."? Because the reset handler is the first entry of the ISR vector table?
+AQUESTION: So it would be more appropriate to say "you must put the isr vector table at the start of the application code."? Because the reset handler is the first entry of the ISR vector table?
 
 You are getting closer to the perfect definition.
 
@@ -455,6 +450,76 @@ Before you jump, you **must disable all interrupts** (`__disable_irq()`) and cle
 
 **Would you like to see the Linker Script command (`MEMORY` command) that ensures the App creates this binary structure at the correct address?**
 
+CQUESTION: Funny question, but like where is the default bootloader? Like where can I see that code you're saying is "in every cortex-M application" lol? I'm using STM nucleo L476RG. And like theoretically if I was making my own bootloader, do I just erase the existing "bootloader.c (example name)" file and replace it with my own code? Or like how does that work? Maybe there's a box "generate bootloader code" that you uncheck when generating your code?
+
+This is the funniest and most common realization in embedded engineering: **"Wait, there is no file?"**
+
+You are looking for a file named `bootloader.c`, but in your current project, **it does not exist.**
+
+Right now, on your Nucleo L476RG, your "Blinky LED" program **IS** the Bootloader. It is the first thing the CPU runs.
+
+Here is the breakdown of the "Default" vs. "Custom" confusion.
+
+### 1. The "Default" Bootloader (The Hardware one)
+
+There *is* a piece of code that was on your chip before you even bought it. It is called the **System Memory Bootloader**.
+
+* **Where is it?** It is burned into a hidden "ROM" region of the chip (System Memory) by ST at the factory.
+* **Can I see the code?** No. It is proprietary ST code.
+* **Can I delete/replace it?** No. It is read-only.
+* **What does it do?** It checks the **BOOT0 pin**. If you hold that pin high while resetting, this code runs instead of yours. It allows you to flash the chip via USB or UART if you accidentally "brick" it.
+
+### 2. The "Startup" Code (The file you DO have)
+
+When you said *"that code you said is in every application,"* you are likely looking at the **Startup File**.
+
+* **File Name:** Usually `startup_stm32l476xx.s` (Assembly) in your generic `Core/Startup` folder.
+* **What it does:** This is the *real* "default bootloader" of your application.
+1. Initializes the Stack Pointer.
+2. Copies variables from Flash to RAM.
+3. Jumps to `main()`.
+
+
+
+**You do not delete this.** Every program needs this to wake up.
+
+### 3. "How do I make my own Bootloader?"
+
+This is where your mental model of "unchecking a box" needs a slight shift.
+
+You don't *modify* your current project to become a bootloader. You create **Two Separate Projects**.
+
+**Project A: The Custom Bootloader**
+
+* **Location:** You tell the Linker: "Put this at `0x08000000` (Start of Flash)."
+* **Code:** Inside `main()`, it checks "Is the button pressed?"
+* *Yes:* Enter "Update Mode" (wait for UART data).
+* *No:* Run that `JumpToApplication()` function I showed you earlier.
+
+
+
+**Project B: Your Actual Application**
+
+* **Location:** You tell the Linker: "Put this at `0x08004000` (Start + Offset)."
+* **Code:** This is your normal code.
+* **The Change:** You *keep* the startup file (`startup_stm32...s`) in this project too! The application needs its own startup sequence to initialize its own variables after the jump.
+
+### Summary
+
+1. **Where is the code now?** The "Jump" logic I showed you **is not on your board yet**. It only exists if you write it.
+2. **Do I erase `bootloader.c`?** No. You create a **new project** that lives at Address 0, and you move your **old project** to Address 1.
+3. **The Box to Uncheck:** There is no box. The "switch" is purely inside the **Linker Script (`.ld`)**. You manually change `FLASH ORIGIN = 0x08000000` to `0x08004000` for the second project.
+
+**Would you like to see the one-line change in the Linker Script that turns a "Normal App" into an "App that sits at 0x4000"?**
+
+UQUESTION: > uint32_t app_stack = *(volatile uint32_t*)APP_ADDRESS; // So what is the data type of APP_ADDRESS before you cast it to a memory address? Like is it (and all other macros defined as 0x1234...) just 32 bit integers? What if you said #define example_macro 0x123456789123456789, like that's too big for 32 bits so like where is that stored?
+
+UQUESTION: >     uint32_t app_stack = *(volatile uint32_t*)APP_ADDRESS; // I just don't understand. Why in the world are we immediately dereferencing a memory address that we just casted to a memory address? My understanding of this line of code is "cast a uint32 to a volatile pointer then cast it to a uint32"???
+
+UQUESTION: > If you put your Reset Handler (code instructions) at the very start (`0x00`), the CPU will try to load your machine code instructions as a memory address for the Stack Pointer. Your stack will point to a random location, and your chip will crash immediately. // I think you meant to say "CPU will try to load the memory address of your machine code instructions"? Like it won't load the instruction itself just the address of the first location?
+
+UQUESTION: > __set_MSP(app_stack); // I've never heard the words "hardware intrincsic" in my life.
+
 UQUESTION: > * **Address `0x00`:** Initial Stack Pointer Value (Where the stack starts in RAM). But isn't that just "the start of RAM"? Like does not the stack always start at the beginning of RAM? If not I mean what is the STRUCTURE OF RAM? Isn't RAM just the stack and the heap?
 
 UQUESTION: > **Write App Base to VTOR:** "Okay, all future interrupts for this app are located here." Gonna have to explain this to me? What are you saying? The app moves the ISR table to somewhere else? RAM? Because reading pointers from RAM is faster than re-reading it from flash?
@@ -465,7 +530,7 @@ UQUESTION: Casting an address to a function pointer? This is literally voodoo ma
 
 UQUESTION: So wait theres an initial stack pointer and a main stack pointer? Two stack pointers? You've got to be kidding me.
 
-UQUESTION: What does "volatile" do here:     uint32_t app_stack = *(volatile uint32_t*)APP_ADDRESS;
+UQUESTION: What does "volatile" do here:     uint32_t app_stack = *(volatile uint32_t*)APP_ADDRESS; // Like what would happen if we didn't put volatile?
 
 UQUESTION: Wait are you saying the OS is written to flash? You differentiated "No OS" vs "with a bootloader". Are you saying a boot loader is an OS?
 
@@ -474,3 +539,7 @@ UQUESTION: You said global variables with initial values are put into flash and 
 UQUESTION: What the is .bss? What does it stand for and why is that an intuitive name?
 
 UQUESTION: What happens when you max out ram then try to use more ram? like if you create a trillion global variables with initial values?
+
+UQUESTION: What are interrupt bits? Maybe I can see them in action right now in my STM nucleo L476RG?
+
+UQUESTION: > Before you jump, you **must disable all interrupts** (`__disable_irq()`) and clear any pending interrupt bits. // So that implies the first thing main() must do is re-enable interrupts. And if a critical  life-saving interrupt gets called while we have interrupts disabled and someone dies (example) ????

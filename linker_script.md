@@ -455,6 +455,10 @@ Before you jump, you **must disable all interrupts** (`__disable_irq()`) and cle
 
 **Would you like to see the Linker Script command (`MEMORY` command) that ensures the App creates this binary structure at the correct address?**
 
+UQUESTION: > * **Address `0x00`:** Initial Stack Pointer Value (Where the stack starts in RAM). But isn't that just "the start of RAM"? Like does not the stack always start at the beginning of RAM? If not I mean what is the STRUCTURE OF RAM? Isn't RAM just the stack and the heap?
+
+UQUESTION: > **Write App Base to VTOR:** "Okay, all future interrupts for this app are located here." Gonna have to explain this to me? What are you saying? The app moves the ISR table to somewhere else? RAM? Because reading pointers from RAM is faster than re-reading it from flash?
+
 UQUESTION: I don't understand why the application would crash if you put garbage as the first entry on the ISR vector table.
 
 UQUESTION: Casting an address to a function pointer? This is literally voodoo magic. You've gotta explain this syntax to me:     void (*app_reset_handler)(void) = (void*)app_reset_handler_address;

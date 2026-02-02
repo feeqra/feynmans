@@ -450,7 +450,7 @@ Before you jump, you **must disable all interrupts** (`__disable_irq()`) and cle
 
 **Would you like to see the Linker Script command (`MEMORY` command) that ensures the App creates this binary structure at the correct address?**
 
-CQUESTION: Funny question, but like where is the default bootloader? Like where can I see that code you're saying is "in every cortex-M application" lol? I'm using STM nucleo L476RG. And like theoretically if I was making my own bootloader, do I just erase the existing "bootloader.c (example name)" file and replace it with my own code? Or like how does that work? Maybe there's a box "generate bootloader code" that you uncheck when generating your code?
+AQUESTION: Funny question, but like where is the default bootloader? Like where can I see that code you're saying is "in every cortex-M application" lol? I'm using STM nucleo L476RG. And like theoretically if I was making my own bootloader, do I just erase the existing "bootloader.c (example name)" file and replace it with my own code? Or like how does that work? Maybe there's a box "generate bootloader code" that you uncheck when generating your code?
 
 This is the funniest and most common realization in embedded engineering: **"Wait, there is no file?"**
 
@@ -511,6 +511,245 @@ You don't *modify* your current project to become a bootloader. You create **Two
 3. **The Box to Uncheck:** There is no box. The "switch" is purely inside the **Linker Script (`.ld`)**. You manually change `FLASH ORIGIN = 0x08000000` to `0x08004000` for the second project.
 
 **Would you like to see the one-line change in the Linker Script that turns a "Normal App" into an "App that sits at 0x4000"?**
+
+AQUESTION: Wait oh my God! Are you saying you first flash the bootloader then you flash your actual application code? Flashing two projects back to back??? This is crazy!! But how do you tell the bootloader "hey I haven't flashed the application yet so don't jump to the application."? Surely the bootloader won't poll "while (!application_flashed) no-op".
+
+
+Yes! That reaction you are having right now? That is the sound of the "Black Magic" of embedded systems fading away.
+
+You are 100% correct. In a production environment, we physically flash the Bootloader, and then immediately flash the Application right behind it.
+
+To answer your question: **How does it know not to jump into the void?**
+
+It relies on a physical property of Flash memory.
+
+### 1. The "Erased" State (`0xFF`)
+
+When Flash memory is empty (erased), it doesn't read as `0`. It reads as **all ones** (`0xFFFFFFFF`).
+
+If you haven't flashed your application yet, the memory at address `0x08004000` is literally just `FFFFFFFF`.
+
+### 2. The Check (Look Before You Leap)
+
+The bootloader doesn't poll. It just runs a simple `if` statement at startup.
+
+It looks at the **Application's Stack Pointer** (the first 4 bytes of the app).
+
+* **If valid:** The Stack Pointer usually points to RAM (starts with `0x20...`).
+* **If empty:** The value is `0xFFFFFFFF`.
+
+Here is the code that lives inside the Bootloader's `main()`:
+
+```c
+#define APP_ADDRESS  0x08004000
+
+int main(void) {
+    // 1. Initialize hardware (Clocks, GPIO, UART)
+    HAL_Init();
+
+    // 2. Read the first word of the Application space
+    uint32_t app_stack_pointer = *(volatile uint32_t*)APP_ADDRESS;
+
+    // 3. CHECK: Is it 0xFFFFFFFF? Or does it look like a RAM address?
+    // (0x20000000 is the start of RAM on STM32)
+    if (app_stack_pointer == 0xFFFFFFFF || (app_stack_pointer & 0x20000000) == 0)
+    {
+        // EMPTY! Stay here and wait for a download.
+        Enter_Bootloader_Mode();
+    }
+    else
+    {
+        // VALID! Jump to the app.
+        JumpToApplication();
+    }
+}
+
+```
+
+### 3. The "Production" Flow
+
+So, the manufacturing line looks like this:
+
+1. **Power Up:** Chip is blank.
+2. **Flash Bootloader:** Now sectors 0-3 are full. The rest is empty (`0xFF`).
+3. **Reboot:** Bootloader runs -> checks `0x08004000` -> sees `0xFF` -> enters "Waiting Mode."
+4. **Flash Application:** You load the application code into `0x08004000`.
+5. **Reboot:** Bootloader runs -> checks `0x08004000` -> sees valid stack pointer -> **JUMPS.**
+
+You have just successfully built a two-stage boot system.
+
+**Would you like to know how we prevent the user from accidentally overwriting the Bootloader when they try to update the App? (The concept of Write Protection).**
+
+Great. This is the final piece of the puzzle: **Immutable Security.**
+
+You have two lines of defense to stop your Application (or a bug) from nuking your Bootloader: **The Map (Software)** and **The Lock (Hardware).**
+
+### 1. The Map (Linker Script Prevention)
+
+This is your first line of defense. It prevents you from *accidentally compiling* code that overlaps.
+
+In the **Application's** linker script (`STM32L476RGTX_FLASH.ld`), you explicitly shrink the available memory.
+
+**Original (Dangerous):**
+
+```ld
+/* Says the app can use the whole chip */
+FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 1024K 
+
+```
+
+**Modified (Safe):**
+
+```ld
+/* Says the app starts late and has less space */
+FLASH (rx) : ORIGIN = 0x08004000, LENGTH = 1008K 
+
+```
+
+If your application grows too big, the Linker will throw an error ("Region FLASH overflowed") rather than silently overwriting the bootloader space at the beginning.
+
+### 2. The Lock (Hardware Option Bytes)
+
+The Linker script only stops *build-time* overlap. It does not stop your code from saying:
+`HAL_FLASH_Erase(Address_0x08000000);`
+
+If your application has a bug (or gets hacked) and runs that erase command, your bootloader is gone. To stop this, we use **Option Bytes (WRP - Write Protection).**
+
+On your STM32 L476RG:
+
+1. The Flash memory is divided into **Pages** (2KB each).
+2. There are special non-volatile registers called **Option Bytes**.
+3. You can configure these bytes to mark Pages 0–7 (where the Bootloader lives) as **Write Protected (WRP)**.
+
+**The Result:**
+If *any* code (Bootloader OR App) tries to write or erase those pages, the Hardware Flash Controller blocks the request and triggers a **Flash Error Interrupt**. The write physically fails.
+
+### 3. The "MPU" (Runtime Bodyguard)
+
+For even tighter security, you can use the **MPU (Memory Protection Unit)** inside the Cortex-M4.
+
+In your Bootloader code, right before jumping to the App, you can configure the MPU:
+
+* **Region 0:** Address `0x08000000` to `0x08004000`.
+* **Permission:** `PRIV_RO` (Privileged Read-Only).
+
+Once you enable the MPU and jump, if the Application tries to write to that region, the CPU catches it instantly and throws a **MemManage Fault** (Memory Management Fault).
+
+### Summary of Defense
+
+| Method | Type | Protects Against |
+| --- | --- | --- |
+| **Linker Script** | Software | Accidental code overlap during compilation. |
+| **Option Bytes (WRP)** | Hardware | *Any* erase/write attempt (Bug or Malicious). **This is the gold standard.** |
+| **MPU** | Runtime | Application bugs accessing forbidden memory regions. |
+
+---
+
+**Would you like to try a small challenge? I can give you a snippet of a "broken" Linker Script for a Bootloader+App setup, and you tell me why it would cause a crash?**
+
+Here is your "Debug Scenario."
+
+### The Setup
+
+You have successfully flashed your **Bootloader** (which lives at `0x0800 0000`) and your **Application** (which you flashed to `0x0800 4000`).
+
+**1. The Bootloader Code (`bootloader.c`)**
+This looks correct. It finds the app and jumps to it.
+
+```c
+#define APP_ADDR 0x08004000
+
+void main() {
+    // ... setup ...
+    Jump_To_Addr(APP_ADDR); // Jumps to 0x08004000
+}
+
+```
+
+**2. The Application Linker Script (`app_linker.ld`)**
+You compiled your Application using this script:
+
+```ld
+/* Entry Point */
+ENTRY(Reset_Handler)
+
+/* Memories Definition */
+MEMORY
+{
+  RAM    (xrw)    : ORIGIN = 0x20000000,   LENGTH = 96K
+  FLASH    (rx)    : ORIGIN = 0x08000000,   LENGTH = 1024K 
+}
+
+SECTIONS
+{
+  .isr_vector :
+  {
+    . = ALIGN(4);
+    KEEP(*(.isr_vector))
+    . = ALIGN(4);
+  } > FLASH
+  /* ... rest of sections ... */
+}
+
+```
+
+### The Crash
+
+The Bootloader runs perfectly. It jumps to `0x0800 4000`.
+The Application starts running! The Reset Handler executes the first few instructions... and then **BOOM**. Hard Fault. Or worse, the device mysteriously resets back into the Bootloader.
+
+**What is the fatal flaw in the Linker Script above?**
+
+
+You are asking the exact right questions. You spotted the problematic line immediately.
+
+Here is the breakdown of why your intuition is right, followed by the **Hint** you asked for regarding the "Run Time" crash.
+
+### 1. "Why didn't this fault at Build Time?"
+
+You asked: *"Don't know how this isn't faulting at build time?"*
+
+**The Linker is lonely.**
+When you compile the Application, the Linker looks *only* at the Application's files. It has no idea that a "Bootloader" project even exists on your hard drive. It assumes it owns the entire chip. It sees `ORIGIN = 0x08000000`, sees that your code fits within `1024K`, and says: *"Success! Here is your binary."*
+
+### 2. "Are we not overriding the bootloader?"
+
+You asked: *"Are we not overriding the bootloader?"*
+
+**Yes, normally you would!**
+If you just hit "Run/Debug" in your IDE, the debugger would read that line (`0x08000000`), see that it overlaps with the Bootloader, and ruthlessly erase your Bootloader to write the App.
+
+**BUT**, in this specific "Scenario," we assume you used a special tool (like STM32 CubeProgrammer) to forced-flash the binary to the `0x0800 4000` offset manually.
+
+* **Physical Reality:** The code is sitting at `0x0800 4000`.
+* **Logical Reality (The Linker's Dream):** The code *thinks* it is at `0x0800 0000`.
+
+### 3. THE HINT (Why it crashes)
+
+You have successfully flashed the code to the offset `0x4000`. The Bootloader jumps there. The CPU starts executing instructions.
+
+Here is your hint: **Absolute Addresses vs. Relative Offsets.**
+
+Think about a global variable in your application, or a function pointer in your Interrupt Vector Table.
+
+* The Linker calculated the address of that variable based on the `ORIGIN` (`0x0800 0000`).
+* Let's say it decided `Reset_Handler` is at `0x0800 0004`.
+
+When the Bootloader jumps to the App, the CPU tries to read the **Application's Vector Table** to find the Reset Handler.
+It reads the address stored there. It finds `0x0800 0004`.
+
+**Where is `0x0800 0004` physically located? Is it inside your Application?**
+
+UQUESTION: So clearly there is a huge gap in my understanding of how global variables are assigned memory addresses? So you're telling me it's simultaneously possible for a global variable to actually be located at 0x0800 4004 but the CPU thinks the variable is at 0x0800 0004 ?? So like the "flasher" actually flashed the variable at the location "0x0800 0000 + 4 bytes" but then the linker said "okay so the variable is at 0x0800 0000 + 4 bytes". This seems EXTREMELY buggy, why would we introduce a tool (the built in stm 32 flasher) that can override/bypess/confuse the linker? Lol I just feel like all my questions are like "why did this design it this way", whoever the hell "they" is/are. And the second part of my catch phrase: "surely there's a good reason that they let users do this." Even though I don't see it yet because of a lack of exposure, I trust that they didn't just introduce a random feature for shits and giggles.
+
+UQUESTION: If your application has a bug (or gets hacked) and runs that erase command, your bootloader is gone. // Denial of service attack?
+
+UQUESTION: FLASH (rx) : ORIGIN = 0x08000000, LENGTH = 1024K // So wait is this saying flash is approx 1MB
+
+UQUESTION: **Flash Bootloader:** Now sectors 0-3 are full. The rest is empty (`0xFF`), **Reboot:** Bootloader runs -> checks `0x08004000` -> sees `0xFF` -> enters "Waiting Mode." // So why do you have to reboot after flash? Does it just load the first memory address of the new flashed application in to the program counter? And also just do other "resetty" things to make sure we're in a good state from what the previous application might have done?
+
+
+UQUESTION: So it sounds like you're saying a custom bootloader is also a user application? Not that it's used by an end user but that the developer needs to write it themselves? In that case what is the purpose of a bootloader? Like why does the concept of a bootloader exist? The only thing I can think of is checking that the firmware is properly signed so the firmware isn't malicious, but like surely if that was the only use case, we would have named it the "initial firmware security checker".
 
 UQUESTION: > uint32_t app_stack = *(volatile uint32_t*)APP_ADDRESS; // So what is the data type of APP_ADDRESS before you cast it to a memory address? Like is it (and all other macros defined as 0x1234...) just 32 bit integers? What if you said #define example_macro 0x123456789123456789, like that's too big for 32 bits so like where is that stored?
 

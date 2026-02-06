@@ -740,6 +740,10 @@ It reads the address stored there. It finds `0x0800 0004`.
 
 **Where is `0x0800 0004` physically located? Is it inside your Application?**
 
+UQUESTION: So it sounds like you're telling me that the "linker" tells the CPU where the global variables are? Like I guess I don't get how the linker communicates with the CPU? Like doesn't the CPU just grab the reset handler and then that's that?
+
+UQUESTION: So wait, why is it called a "vector table". Like interrupt table is incredibly self-descriptive? Who decided to also call it "vector"?
+
 UQUESTION: So clearly there is a huge gap in my understanding of how global variables are assigned memory addresses? So you're telling me it's simultaneously possible for a global variable to actually be located at 0x0800 4004 but the CPU thinks the variable is at 0x0800 0004 ?? So like the "flasher" actually flashed the variable at the location "0x0800 0000 + 4 bytes" but then the linker said "okay so the variable is at 0x0800 0000 + 4 bytes". This seems EXTREMELY buggy, why would we introduce a tool (the built in stm 32 flasher) that can override/bypess/confuse the linker? Lol I just feel like all my questions are like "why did this design it this way", whoever the hell "they" is/are. And the second part of my catch phrase: "surely there's a good reason that they let users do this." Even though I don't see it yet because of a lack of exposure, I trust that they didn't just introduce a random feature for shits and giggles.
 
 UQUESTION: If your application has a bug (or gets hacked) and runs that erase command, your bootloader is gone. // Denial of service attack?
